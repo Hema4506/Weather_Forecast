@@ -5,11 +5,9 @@ import matplotlib.pyplot as plt
 import calendar
 from datetime import datetime
 from io import BytesIO
+import hashlib
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import mean_absolute_error, r2_score
-
+from countryinfo import CountryInfo
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
@@ -18,8 +16,8 @@ from reportlab.lib.pagesizes import A4
 #  PAGE CONFIGURATION
 # ------------------------------------------------------------
 st.set_page_config(
-    page_title="Weather Prediction by City & Date",
-    page_icon="☀️",
+    page_title="Global Weather by City",
+    page_icon="🌍",
     layout="wide"
 )
 
@@ -29,13 +27,10 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Sunny sky gradient */
     .stApp {
         background: linear-gradient(180deg, #9fc5e8 0%, #fff2cc 80%);
-        color: #1e2a3a;  /* dark text for contrast */
+        color: #1e2a3a;
     }
-
-    /* Floating clouds – white, semi‑transparent */
     .cloud {
         position: fixed;
         background: rgba(255, 255, 255, 0.35);
@@ -70,8 +65,6 @@ st.markdown(
         from { transform: translateX(0); }
         to { transform: translateX(180vw); }
     }
-
-    /* Moving sun */
     .sun {
         position: fixed;
         top: 8%;
@@ -89,16 +82,19 @@ st.markdown(
         from { transform: translateX(0); }
         to { transform: translateX(120vw); }
     }
-
-    /* Style cards and widgets for light background */
-    .stMetric {
-        background: rgba(255, 255, 255, 0.5);
-        backdrop-filter: blur(8px);
-        border-radius: 20px;
-        padding: 20px;
-        border: 1px solid rgba(255, 255, 255, 0.7);
+    .weather-card {
+        background: rgba(255, 255, 255, 0.3);
+        backdrop-filter: blur(10px);
+        border-radius: 25px;
+        padding: 1.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.5);
         box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-        color: #1e2a3a;
+        text-align: center;
+        transition: transform 0.3s ease;
+    }
+    .weather-card:hover {
+        transform: translateY(-5px);
+        background: rgba(255, 255, 255, 0.4);
     }
     h1, h2, h3 {
         font-weight: 300;
@@ -121,16 +117,11 @@ st.markdown(
         border-color: #5f9ea0;
         transform: scale(1.02);
     }
-    /* Dataframe text */
     .stDataFrame {
         color: #1e2a3a;
     }
     </style>
-
-    <!-- Sun element -->
     <div class="sun"></div>
-
-    <!-- Cloud elements -->
     <div class="cloud cloud1"></div>
     <div class="cloud cloud2"></div>
     <div class="cloud cloud3"></div>
@@ -139,118 +130,190 @@ st.markdown(
 )
 
 # ------------------------------------------------------------
-#  GENERATE SYNTHETIC CLIMATE DATA (realistic monthly norms)
+#  HELPER FUNCTIONS FOR CLIMATE ZONE AND PREDICTIONS
 # ------------------------------------------------------------
 @st.cache_data
-def generate_climate_data():
-    """Create a daily dataset for 5 cities based on approximate monthly norms."""
-    cities = {
-        "New York": {
-            "monthly_temp": [1, 2, 7, 13, 19, 24, 27, 26, 22, 16, 10, 4],
-            "monthly_rainfall": [90, 80, 110, 100, 110, 100, 110, 100, 100, 90, 100, 100],
-            "monthly_humidity": [70, 68, 67, 64, 67, 69, 70, 71, 72, 70, 70, 70]
-        },
-        "London": {
-            "monthly_temp": [5, 5, 8, 11, 15, 18, 21, 20, 17, 13, 9, 6],
-            "monthly_rainfall": [55, 40, 55, 45, 50, 50, 45, 50, 50, 60, 60, 55],
-            "monthly_humidity": [80, 78, 75, 72, 71, 70, 71, 73, 76, 79, 81, 81]
-        },
-        "Tokyo": {
-            "monthly_temp": [6, 7, 10, 16, 21, 24, 28, 29, 25, 19, 14, 9],
-            "monthly_rainfall": [50, 70, 110, 120, 130, 160, 150, 170, 190, 180, 90, 50],
-            "monthly_humidity": [55, 56, 60, 66, 70, 75, 77, 76, 75, 70, 65, 59]
-        },
-        "Sydney": {
-            "monthly_temp": [23, 23, 22, 19, 16, 14, 13, 15, 18, 20, 22, 24],
-            "monthly_rainfall": [90, 110, 130, 130, 120, 130, 100, 80, 70, 80, 90, 80],
-            "monthly_humidity": [70, 73, 74, 72, 70, 68, 65, 62, 63, 66, 68, 69]
-        },
-        "Cape Town": {
-            "monthly_temp": [21, 21, 20, 18, 15, 13, 12, 13, 15, 17, 19, 21],
-            "monthly_rainfall": [15, 15, 20, 50, 80, 110, 100, 90, 60, 35, 20, 15],
-            "monthly_humidity": [70, 72, 73, 74, 76, 78, 78, 77, 75, 73, 71, 70]
-        }
+def get_all_countries():
+    """Return a sorted list of all country names using countryinfo."""
+    try:
+        all_countries = list(CountryInfo().all().keys())
+        return sorted(all_countries)
+    except:
+        # Fallback to a reasonable list if countryinfo fails
+        return ["United States", "Canada", "United Kingdom", "Germany", "France",
+                "Italy", "Spain", "Australia", "Japan", "China", "India", "Brazil",
+                "South Africa", "Egypt", "Russia"]
+
+@st.cache_data
+def get_country_lat(country_name):
+    """Return approximate latitude of the country's center."""
+    try:
+        country = CountryInfo(country_name)
+        latlng = country.info().get('latlng', [30, 0])
+        return latlng[0]
+    except:
+        return 30.0
+
+def get_climate_zone(lat):
+    abs_lat = abs(lat)
+    if abs_lat >= 60:
+        return "polar"
+    elif abs_lat >= 30:
+        return "temperate"
+    else:
+        return "tropical"
+
+def get_season_shift(lat):
+    return 6 if lat < 0 else 0
+
+def get_monthly_norms(zone):
+    """
+    Return baseline monthly temperature (°C) and monthly rainfall total (mm) for a given zone.
+    Indices 0..11 correspond to months Jan..Dec in northern hemisphere.
+    """
+    if zone == "tropical":
+        temp_base = [26, 27, 28, 28, 28, 27, 26, 26, 26, 27, 27, 26]
+        rain_base = [50, 60, 80, 100, 150, 200, 250, 250, 200, 120, 70, 50]  # monthly totals
+    elif zone == "temperate":
+        temp_base = [2, 4, 8, 12, 17, 21, 24, 23, 19, 13, 7, 3]
+        rain_base = [60, 50, 60, 50, 60, 70, 70, 70, 60, 60, 60, 60]
+    elif zone == "polar":
+        temp_base = [-20, -18, -15, -8, 0, 5, 8, 7, 2, -5, -12, -18]
+        rain_base = [20, 15, 15, 10, 10, 15, 20, 25, 20, 15, 15, 20]
+    else:
+        temp_base = [2, 4, 8, 12, 17, 21, 24, 23, 19, 13, 7, 3]
+        rain_base = [60, 50, 60, 50, 60, 70, 70, 70, 60, 60, 60, 60]
+    return np.array(temp_base), np.array(rain_base)
+
+def city_hash_offset(city_name, max_offset):
+    """Deterministic offset between -max_offset and +max_offset from city name."""
+    if not city_name:
+        return 0.0
+    hash_val = int(hashlib.md5(city_name.encode()).hexdigest()[:8], 16)
+    return (hash_val / (16**8) * 2 - 1) * max_offset
+
+def days_in_month(year, month):
+    """Return number of days in given month (year is used for February leap years)."""
+    if month == 2:
+        # Simple leap year check
+        leap = (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0))
+        return 29 if leap else 28
+    elif month in [4, 6, 9, 11]:
+        return 30
+    else:
+        return 31
+
+def predict_weather(country, city, date):
+    """
+    Predict temperature, rainfall, humidity, wind speed, and feels-like.
+    Uses climate zone based on country latitude, seasonal shift, and city-specific variation.
+    Rainfall is converted from monthly total to a realistic daily amount.
+    """
+    lat = get_country_lat(country)
+    zone = get_climate_zone(lat)
+    shift = get_season_shift(lat)
+
+    month = date.month
+    year = date.year
+    # Adjust month for southern hemisphere
+    adjusted_month = ((month - 1 + shift) % 12) + 1
+    idx = adjusted_month - 1
+
+    temp_base, rain_base = get_monthly_norms(zone)
+
+    # Base monthly values
+    base_temp = temp_base[idx]
+    base_monthly_rain = rain_base[idx]
+
+    # City-specific offsets
+    temp_offset = city_hash_offset(city, 2.0)                     # ±2°C
+    rain_factor = 0.5 + city_hash_offset(city + "_rf", 0.5)       # 0.0–1.0, to make daily rain variable
+    hum_offset = city_hash_offset(city + "_hum", 8.0)             # ±8%
+    wind_offset = city_hash_offset(city + "_wind", 5.0)           # ±5 km/h
+
+    # Daily average rain from monthly total
+    days = days_in_month(year, month)
+    avg_daily_rain = base_monthly_rain / days
+
+    # Daily rainfall amount: can be 0–2× average, but never negative
+    # Use rain_factor to scale: if rain_factor < 0.2, it's a dry day; else rainy with amount.
+    # This makes rainfall sporadic and more realistic.
+    if rain_factor < 0.2:
+        daily_rain = 0.0
+    else:
+        # Scale between 0.5× and 2× average
+        daily_rain = avg_daily_rain * (0.5 + rain_factor)
+
+    # Humidity – loosely based on rainfall
+    if daily_rain > 5:
+        base_hum = 85
+    elif daily_rain > 1:
+        base_hum = 75
+    elif daily_rain > 0.1:
+        base_hum = 70
+    else:
+        base_hum = 60
+    # Add some variation from city
+    hum = np.clip(base_hum + hum_offset, 20, 100)
+
+    # Wind speed – base from zone plus city offset
+    if zone == "polar":
+        base_wind = 15
+    elif zone == "temperate":
+        base_wind = 12
+    else:
+        base_wind = 8
+    wind_speed = max(0, base_wind + wind_offset)
+
+    # Temperature
+    temp = base_temp + temp_offset
+
+    # Feels like – simplified heat index / wind chill
+    if temp >= 27 and hum > 60:
+        feels_like = temp + 0.1 * hum - 5
+    elif temp < 10:
+        feels_like = temp - 2
+    else:
+        feels_like = temp
+
+    # Weather condition (more granular)
+    if daily_rain > 10:
+        condition = "🌧️ Heavy Rain"
+    elif daily_rain > 2:
+        condition = "🌦️ Rain"
+    elif daily_rain > 0.1:
+        condition = "☔ Drizzle"
+    elif hum > 85:
+        condition = "☁️ Cloudy"
+    elif hum > 70:
+        condition = "⛅ Partly Cloudy"
+    elif temp > 30:
+        condition = "☀️ Hot"
+    else:
+        condition = "☀️ Sunny"
+
+    return {
+        "temperature": round(temp, 1),
+        "feels_like": round(feels_like, 1),
+        "rainfall": round(daily_rain, 1),
+        "humidity": round(hum, 1),
+        "wind_speed": round(wind_speed, 1),
+        "condition": condition,
+        "zone": zone,
+        "monthly_temp_base": temp_base,
+        "monthly_rain_base": rain_base
     }
 
-    rows = []
-    np.random.seed(42)  # for reproducibility
-    for city, data in cities.items():
-        for month in range(1, 13):
-            days_in_month = calendar.monthrange(2024, month)[1]
-            base_temp = data["monthly_temp"][month-1]
-            base_rain = data["monthly_rainfall"][month-1]
-            base_hum = data["monthly_humidity"][month-1]
-
-            for day in range(1, days_in_month + 1):
-                # Add realistic daily variation
-                temp = base_temp + np.random.uniform(-2.5, 2.5)
-                rain = max(0, base_rain + np.random.normal(0, base_rain * 0.15))
-                hum = np.clip(base_hum + np.random.uniform(-8, 8), 20, 100)
-
-                rows.append({
-                    "city": city,
-                    "month": month,
-                    "day": day,
-                    "temperature": round(temp, 1),
-                    "rainfall": round(rain, 1),
-                    "humidity": round(hum, 1)
-                })
-
-    return pd.DataFrame(rows)
-
-# ------------------------------------------------------------
-#  TRAIN MODELS (cached)
-# ------------------------------------------------------------
-@st.cache_resource
-def train_models(df):
-    """Train Random Forest regressors for temperature, rainfall, humidity."""
-    # Encode city
-    le_city = LabelEncoder()
-    df["city_code"] = le_city.fit_transform(df["city"])
-
-    # Features: city, month, day
-    X = df[["city_code", "month", "day"]]
-    y_temp = df["temperature"]
-    y_rain = df["rainfall"]
-    y_hum = df["humidity"]
-
-    # Models
-    model_temp = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-    model_rain = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-    model_hum = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-
-    model_temp.fit(X, y_temp)
-    model_rain.fit(X, y_rain)
-    model_hum.fit(X, y_hum)
-
-    return model_temp, model_rain, model_hum, le_city
-
-# ------------------------------------------------------------
-#  HELPER: get weather condition from predictions
-# ------------------------------------------------------------
-def get_weather_condition(temp, rain, hum):
-    """Classify weather based on predicted values."""
-    if rain > 5.0:
-        return "🌧️ Heavy Rain"
-    elif rain > 1.0:
-        return "🌦️ Rainy"
-    elif rain > 0.1:
-        return "☔ Drizzle"
-    elif hum > 80:
-        return "☁️ Cloudy"
-    elif hum > 60:
-        return "⛅ Partly Cloudy"
-    else:
-        return "☀️ Sunny"
-
-# ------------------------------------------------------------
-#  LOAD DATA & MODELS (once)
-# ------------------------------------------------------------
-df_climate = generate_climate_data()
-model_temp, model_rain, model_hum, le_city = train_models(df_climate)
-
-# Prepare city list for dropdown
-cities = le_city.classes_.tolist()
+def get_country_monthly_profile(country):
+    """Return typical monthly temperature and rainfall arrays for the country (shifted for hemisphere)."""
+    lat = get_country_lat(country)
+    zone = get_climate_zone(lat)
+    shift = get_season_shift(lat)
+    temp_base, rain_base = get_monthly_norms(zone)
+    if shift != 0:
+        temp_base = np.roll(temp_base, shift)
+        rain_base = np.roll(rain_base, shift)
+    return temp_base, rain_base
 
 # ------------------------------------------------------------
 #  UI HEADER
@@ -258,10 +321,10 @@ cities = le_city.classes_.tolist()
 st.markdown(
     """
     <h1 style='text-align: center; font-size: 3.2rem; font-weight: 300; margin-bottom: 0;'>
-        🌤️ Weather Forecast by City & Date
+        🌤️ Global Weather by City
     </h1>
     <p style='text-align: center; font-size: 1.2rem; color: #2c3e50; margin-top: 0;'>
-        Select a city and a date – get instant temperature, rainfall, humidity & weather condition
+        Any country, any city, any date – realistic forecast based on climate norms
     </p>
     """,
     unsafe_allow_html=True
@@ -270,145 +333,125 @@ st.markdown(
 # ------------------------------------------------------------
 #  INPUT SECTION
 # ------------------------------------------------------------
-col1, col2, col3 = st.columns([2, 2, 1], gap="medium")
+all_countries = get_all_countries()
+
+col1, col2, col3, col4 = st.columns([1.5, 1.5, 1.5, 1], gap="medium")
 
 with col1:
-    selected_city = st.selectbox("🌆 Choose a city", cities, index=0)
+    selected_country = st.selectbox("🌎 Choose a country", all_countries, index=all_countries.index("United States") if "United States" in all_countries else 0)
 
 with col2:
-    selected_date = st.date_input("📅 Pick a date", datetime(2024, 6, 15))
+    city_name = st.text_input("🏙️ Enter city name", value="Mumbai")
 
 with col3:
+    selected_date = st.date_input("📅 Pick a date", datetime(2024, 6, 15))
+
+with col4:
     st.markdown("<br>", unsafe_allow_html=True)
-    predict_btn = st.button("🔮 Predict Weather", type="primary")
+    predict_btn = st.button("🔮 Predict", type="primary")
 
 # ------------------------------------------------------------
-#  PREDICTION & VISUALIZATION (when button clicked)
+#  PREDICTION & VISUALIZATION
 # ------------------------------------------------------------
-if predict_btn:
-    # Encode inputs
-    city_code = le_city.transform([selected_city])[0]
-    month = selected_date.month
-    day = selected_date.day
+if predict_btn and city_name.strip():
+    weather = predict_weather(selected_country, city_name.strip(), selected_date)
 
-    # Create feature array
-    X_input = np.array([[city_code, month, day]])
-
-    # Predict
-    pred_temp = model_temp.predict(X_input)[0]
-    pred_rain = model_rain.predict(X_input)[0]
-    pred_hum = model_hum.predict(X_input)[0]
-    condition = get_weather_condition(pred_temp, pred_rain, pred_hum)
-
-    # --------------------------------------------------------
-    #  METRICS ROW
-    # --------------------------------------------------------
+    # Metrics in styled cards
     st.markdown("---")
-    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-    mcol1.metric("🌡️ Temperature", f"{pred_temp:.1f} °C")
-    mcol2.metric("💧 Rainfall", f"{pred_rain:.1f} mm")
-    mcol3.metric("💨 Humidity", f"{pred_hum:.0f} %")
-    mcol4.metric("🌥️ Condition", condition)
+    st.markdown(
+        f"""
+        <div style="display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center;">
+            <div class="weather-card" style="flex: 1; min-width: 140px;">
+                <h3 style="margin:0;">🌡️ Temp</h3>
+                <p style="font-size: 2.2rem; margin:0;">{weather['temperature']} °C</p>
+            </div>
+            <div class="weather-card" style="flex: 1; min-width: 140px;">
+                <h3 style="margin:0;">🤔 Feels like</h3>
+                <p style="font-size: 2.2rem; margin:0;">{weather['feels_like']} °C</p>
+            </div>
+            <div class="weather-card" style="flex: 1; min-width: 140px;">
+                <h3 style="margin:0;">💧 Rain</h3>
+                <p style="font-size: 2.2rem; margin:0;">{weather['rainfall']} mm</p>
+            </div>
+            <div class="weather-card" style="flex: 1; min-width: 140px;">
+                <h3 style="margin:0;">💨 Humidity</h3>
+                <p style="font-size: 2.2rem; margin:0;">{weather['humidity']} %</p>
+            </div>
+            <div class="weather-card" style="flex: 1; min-width: 140px;">
+                <h3 style="margin:0;">🌬️ Wind</h3>
+                <p style="font-size: 2.2rem; margin:0;">{weather['wind_speed']} km/h</p>
+            </div>
+            <div class="weather-card" style="flex: 1; min-width: 160px; background: rgba(255,240,200,0.4);">
+                <h3 style="margin:0;">{weather['condition'].split()[0]}</h3>
+                <p style="font-size: 1.8rem; margin:0;">{' '.join(weather['condition'].split()[1:])}</p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    # --------------------------------------------------------
-    #  VISUALIZATIONS (Actual vs Predicted for the selected city)
-    # --------------------------------------------------------
-    st.markdown("## 📊 Climate Profile & Model Performance")
+    # Climate profile chart
+    st.markdown("## 📈 Typical Monthly Climate")
+    temp_profile, rain_profile = get_country_monthly_profile(selected_country)
 
-    # Filter data for the selected city
-    city_data = df_climate[df_climate["city"] == selected_city].copy()
-    city_data["city_code"] = le_city.transform([selected_city])[0]
+    months_abbr = [calendar.month_abbr[i] for i in range(1,13)]
+    month_idx = selected_date.month - 1
 
-    # Compute actual monthly averages from the synthetic dataset
-    monthly_actual = city_data.groupby("month")[["temperature", "rainfall"]].mean().reset_index()
-
-    # Generate model predictions for each month (using the 15th day as representative)
-    pred_rows = []
-    for m in range(1, 13):
-        X_pred = np.array([[city_code, m, 15]])
-        t = model_temp.predict(X_pred)[0]
-        r = model_rain.predict(X_pred)[0]
-        pred_rows.append({"month": m, "temp_pred": t, "rain_pred": r})
-    monthly_pred = pd.DataFrame(pred_rows)
-
-    # Merge for plotting
-    plot_df = monthly_actual.merge(monthly_pred, on="month")
-
-    # Create two charts side by side
     colL, colR = st.columns(2)
 
     with colL:
-        fig1, ax1 = plt.subplots(figsize=(8, 4))
-        ax1.plot(plot_df["month"], plot_df["temperature"], "o-", label="Actual (avg)", color="#1e6f9f", linewidth=2)
-        ax1.plot(plot_df["month"], plot_df["temp_pred"], "s--", label="Predicted", color="#f39c12", linewidth=2)
-        ax1.axvline(x=month, color="gray", linestyle=":", alpha=0.7, label="Selected month")
+        fig1, ax1 = plt.subplots(figsize=(8,4))
+        ax1.plot(range(1,13), temp_profile, 'o-', color="#1e6f9f", linewidth=2, label="Typical")
+        ax1.plot(month_idx+1, weather['temperature'], 'ro', markersize=10, label=f"Predicted ({city_name})")
         ax1.set_xlabel("Month")
         ax1.set_ylabel("Temperature (°C)")
-        ax1.set_title(f"Temperature Profile – {selected_city}")
+        ax1.set_title(f"Temperature Profile – {selected_country}")
         ax1.legend()
         ax1.set_xticks(range(1,13))
-        ax1.set_xticklabels([calendar.month_abbr[i] for i in range(1,13)])
+        ax1.set_xticklabels(months_abbr)
         ax1.grid(alpha=0.2)
         st.pyplot(fig1)
 
     with colR:
-        fig2, ax2 = plt.subplots(figsize=(8, 4))
-        ax2.bar(plot_df["month"] - 0.2, plot_df["rainfall"], width=0.4, label="Actual (avg)", color="#1e6f9f", alpha=0.8)
-        ax2.bar(plot_df["month"] + 0.2, plot_df["rain_pred"], width=0.4, label="Predicted", color="#f39c12", alpha=0.8)
-        ax2.axvline(x=month, color="gray", linestyle=":", alpha=0.7, label="Selected month")
+        fig2, ax2 = plt.subplots(figsize=(8,4))
+        ax2.bar(range(1,13), rain_profile, color="#1e6f9f", alpha=0.7, label="Typical monthly total")
+        ax2.bar(month_idx+1, weather['rainfall'] * days_in_month(selected_date.year, selected_date.month),
+                color="#f39c12", alpha=0.9, label=f"Predicted daily × days")
         ax2.set_xlabel("Month")
         ax2.set_ylabel("Rainfall (mm)")
-        ax2.set_title(f"Rainfall Profile – {selected_city}")
+        ax2.set_title(f"Rainfall Profile – {selected_country}")
         ax2.legend()
         ax2.set_xticks(range(1,13))
-        ax2.set_xticklabels([calendar.month_abbr[i] for i in range(1,13)])
+        ax2.set_xticklabels(months_abbr)
         ax2.grid(alpha=0.2)
         st.pyplot(fig2)
 
-    # --------------------------------------------------------
-    #  DATA QUALITY / MODEL METRICS (like original, but adapted)
-    # --------------------------------------------------------
-    st.markdown("## 📋 Model Accuracy on Training Data")
-    with st.expander("Click to view model performance metrics"):
-        # Compute overall metrics for temperature and rainfall
-        X_all = city_data[["city_code", "month", "day"]]
-        y_temp_all = city_data["temperature"]
-        y_rain_all = city_data["rainfall"]
+    # Climate Norms Table (replaces "Model Accuracy")
+    st.markdown("## 📋 Climate Norms for " + selected_country)
+    with st.expander("Click to view monthly averages (temperature & rainfall)"):
+        norms_df = pd.DataFrame({
+            "Month": months_abbr,
+            "Avg Temp (°C)": temp_profile,
+            "Monthly Rainfall (mm)": rain_profile
+        })
+        st.dataframe(norms_df, use_container_width=True)
+        st.caption("*These are typical long-term averages used to generate daily predictions.*")
 
-        pred_temp_all = model_temp.predict(X_all)
-        pred_rain_all = model_rain.predict(X_all)
-
-        mae_temp = mean_absolute_error(y_temp_all, pred_temp_all)
-        r2_temp = r2_score(y_temp_all, pred_temp_all)
-        mae_rain = mean_absolute_error(y_rain_all, pred_rain_all)
-        r2_rain = r2_score(y_rain_all, pred_rain_all)
-
-        colA, colB, colC, colD = st.columns(4)
-        colA.metric("🌡️ Temp MAE", f"{mae_temp:.2f} °C")
-        colB.metric("🌡️ Temp R²", f"{r2_temp:.3f}")
-        colC.metric("💧 Rain MAE", f"{mae_rain:.1f} mm")
-        colD.metric("💧 Rain R²", f"{r2_rain:.3f}")
-
-        st.caption("*Metrics are computed on the synthetic training data for the selected city.*")
-
-    # --------------------------------------------------------
-    #  PDF REPORT (simplified, like original)
-    # --------------------------------------------------------
+    # PDF Report
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
     story = [
-        Paragraph(f"Weather Forecast for {selected_city}", styles["Title"]),
+        Paragraph(f"Weather Forecast for {city_name}, {selected_country}", styles["Title"]),
         Spacer(1, 12),
         Paragraph(f"Date: {selected_date.strftime('%B %d, %Y')}", styles["Normal"]),
-        Paragraph(f"Temperature: {pred_temp:.1f} °C", styles["Normal"]),
-        Paragraph(f"Rainfall: {pred_rain:.1f} mm", styles["Normal"]),
-        Paragraph(f"Humidity: {pred_hum:.0f} %", styles["Normal"]),
-        Paragraph(f"Condition: {condition}", styles["Normal"]),
+        Paragraph(f"Temperature: {weather['temperature']} °C (feels like {weather['feels_like']} °C)", styles["Normal"]),
+        Paragraph(f"Rainfall: {weather['rainfall']} mm", styles["Normal"]),
+        Paragraph(f"Humidity: {weather['humidity']} %", styles["Normal"]),
+        Paragraph(f"Wind Speed: {weather['wind_speed']} km/h", styles["Normal"]),
+        Paragraph(f"Condition: {weather['condition']}", styles["Normal"]),
         Spacer(1, 24),
-        Paragraph("Model Performance (on training data):", styles["Heading3"]),
-        Paragraph(f"Temperature MAE: {mae_temp:.2f} °C, R²: {r2_temp:.3f}", styles["Normal"]),
-        Paragraph(f"Rainfall MAE: {mae_rain:.1f} mm, R²: {r2_rain:.3f}", styles["Normal"]),
+        Paragraph("Climate Zone: " + weather['zone'].capitalize(), styles["Normal"]),
     ]
     doc.build(story)
     buffer.seek(0)
@@ -416,13 +459,16 @@ if predict_btn:
     st.download_button(
         label="📥 Download PDF Report",
         data=buffer,
-        file_name=f"weather_{selected_city}_{selected_date}.pdf",
+        file_name=f"weather_{city_name}_{selected_date}.pdf",
         mime="application/pdf"
     )
 
 else:
-    # Placeholder info when no prediction made yet
-    st.info("👆 Select a city and date, then click **Predict Weather** to start.")
-    # Show a preview of available cities
-    st.markdown("### 🌍 Available cities")
-    st.write(", ".join(cities))
+    st.info("👆 Select a country, enter a city, pick a date, and click **Predict**.")
+    st.markdown("### 🌍 How it works")
+    st.markdown("""
+    - The app uses the country's latitude to determine its **climate zone** (tropical, temperate, polar).
+    - Monthly temperature and rainfall norms are shifted for the southern hemisphere.
+    - Daily rainfall is derived from monthly totals with city‑specific variation, making it more realistic.
+    - All predictions are **deterministic** – the same city and date always give the same result.
+    """)
